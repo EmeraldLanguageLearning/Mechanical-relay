@@ -16,7 +16,7 @@ let S = null;               // shared game state (host is the authority)
 let PEND = [];              // points awarded during one action
 let lastFlash = 0;
 const LOCAL = { reveal:{}, sel:null, menu:false, err:'' };
-const LINK = { peer:null, conn:null, ok:false, code:'', status:'' };
+const LINK = { ok:false, code:'', status:'' };
 const me = () => ROLE === 'solo' ? null : (ROLE === 'host' ? 0 : 1);
 const isHost = () => ROLE === 'host' || ROLE === 'solo';
 
@@ -154,8 +154,9 @@ function onTimeUp(){
 function act(a){
   unlockAudio();
   if (ROLE === 'guest') {
-    if (LINK.conn && LINK.conn.open) LINK.conn.send({type:'act', a});
-    else toast('Not connected to the Team A device');
+    if (netUp()) netPub('g', {k:'act', a});
+    else toast('Not connected to the internet');
+    if (!LINK.ok) toast('Waiting for the Team A device…');
     return;
   }
   apply(a, 'host');
@@ -169,61 +170,85 @@ function apply(a, from){
 function packed(){ return Object.assign({}, S, {timer:Object.assign({}, S.timer, {rem:remaining()})}); }
 function commit(){
   LS.set('mr-state', S);
-  if (ROLE === 'host' && LINK.conn && LINK.conn.open) { try { LINK.conn.send({type:'state', s:packed()}); } catch(e){} }
+  sendState();
   render();
 }
 
-/* PeerJS linking: Team A device hosts a room, Team B device joins with the code */
-const PREFIX = 'emerald-mrelay-';
+/* Linking through public MQTT relay servers (works across networks, no direct device-to-device connection).
+   Both devices connect to every relay they can reach and send each message to all of them; duplicates are ignored. */
+const BROKERS = [
+  {url:'wss://public.cloud.shiftr.io', o:{username:'public', password:'public'}},
+  {url:'wss://broker.emqx.io:8084/mqtt', o:{}},
+  {url:'wss://test.mosquitto.org:8081/mqtt', o:{}}
+];
+const rid = () => Math.random().toString(36).slice(2, 10);
+const NET = {clients:[], code:'', me:rid(), n:0, seen:new Set(), lastSeq:0, lastPeer:0, started:0};
+const topic = sub => 'emerald-mrelay/v1/' + NET.code + '/' + sub;
+const netUp = () => NET.clients.some(c => c.connected);
 function newCode(){ const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = ''; for (let i = 0; i < 4; i++) c += L[Math.floor(Math.random() * L.length)]; return c; }
-function hostRoom(code){
-  if (typeof Peer === 'undefined') { LINK.status = 'offline'; render(); return; }
-  LINK.code = code; LS.set('mr-code', code); LINK.status = 'opening'; render();
-  const peer = new Peer(PREFIX + code, {debug:0});
-  LINK.peer = peer;
-  peer.on('open', () => { LINK.status = LINK.ok ? 'linked' : 'waiting'; render(); });
-  peer.on('connection', c => {
-    c.on('open', () => {
-      if (LINK.conn && LINK.conn !== c) { try { LINK.conn.close(); } catch(e){} }
-      LINK.conn = c; LINK.ok = true; LINK.status = 'linked';
-      c.send({type:'state', s:packed()}); render(); beep(660, .12);
+function netStart(code, subs, onMsg, onConnect){
+  netStop(); NET.code = code; NET.started = Date.now(); NET.lastPeer = 0; NET.lastSeq = 0;
+  if (typeof mqtt === 'undefined') return;
+  NET.clients = BROKERS.map(b => {
+    let c;
+    try { c = mqtt.connect(b.url, Object.assign({clientId:'emr-' + rid(), keepalive:30, reconnectPeriod:3000, connectTimeout:8000, clean:true}, b.o)); }
+    catch(e){ return null; }
+    c.on('connect', () => { c.subscribe(subs.map(topic)); if (onConnect) onConnect(c); });
+    c.on('message', (t, p) => {
+      let m; try { m = JSON.parse(p.toString()); } catch(e){ return; }
+      if (!m || m.from === NET.me) return;
+      if (m.id) { if (NET.seen.has(m.id)) return; NET.seen.add(m.id); if (NET.seen.size > 600) NET.seen = new Set([...NET.seen].slice(-300)); }
+      onMsg(t.split('/').pop(), m);
     });
-    c.on('data', m => { if (m && m.type === 'act') apply(m.a, 'guest'); });
-    c.on('close', () => { if (LINK.conn === c) { LINK.ok = false; LINK.status = 'waiting'; render(); } });
-  });
-  peer.on('disconnected', () => { try { peer.reconnect(); } catch(e){} });
-  peer.on('error', e => {
-    if (e.type === 'unavailable-id') { try { peer.destroy(); } catch(_){} hostRoom(newCode()); return; }
-    if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') { LINK.status = 'offline'; render(); setTimeout(() => { if (!peer.destroyed && peer.disconnected) try { peer.reconnect(); } catch(_){} }, 4000); }
-  });
+    c.on('error', () => {});
+    return c;
+  }).filter(Boolean);
+}
+function netPub(sub, m, retain, onlyClient){
+  m.from = NET.me; m.id = NET.me + '-' + (++NET.n);
+  const s = JSON.stringify(m);
+  (onlyClient ? [onlyClient] : NET.clients).forEach(c => { if (c.connected) { try { c.publish(topic(sub), s, {qos:0, retain:!!retain}); } catch(e){} } });
+}
+function netStop(clear){
+  NET.clients.forEach(c => { try { if (clear && c.connected) c.publish(topic('s'), '', {retain:true}); c.end(false); } catch(e){} });
+  NET.clients = [];
+}
+function sendState(){ if (ROLE === 'host' && NET.clients.length) netPub('s', {k:'state', seq:Date.now() * 100 + (NET.n % 100), s:packed()}, true); }
+
+function hostRoom(code){
+  LINK.code = code; LS.set('mr-code', code); LINK.status = 'opening'; LINK.ok = false; render();
+  netStart(code, ['g'], (sub, m) => {
+    NET.lastPeer = Date.now();
+    if (!LINK.ok) { LINK.ok = true; LINK.status = 'linked'; beep(660, .12); render(); }
+    if (m.k === 'hello') sendState();
+    if (m.k === 'act' && m.a) apply(m.a, 'guest');
+  }, c => { if (!LINK.ok) { LINK.status = 'waiting'; render(); } sendState(); });
 }
 function joinRoom(code){
-  if (typeof Peer === 'undefined') { LOCAL.err = 'No internet: the devices cannot link.'; render(); return; }
-  LINK.code = code; LS.set('mr-join', code); LINK.status = 'connecting'; render();
-  const connect = () => {
-    if (!LINK.peer || LINK.peer.destroyed) return;
-    const c = LINK.peer.connect(PREFIX + code, {reliable:true});
-    c.on('open', () => { LINK.conn = c; LINK.ok = true; LINK.status = 'linked'; LOCAL.err = ''; render(); beep(660, .12); });
-    c.on('data', m => {
-      if (m && m.type === 'state') {
-        m.s.timer.end = Date.now() + m.s.timer.rem;
-        S = m.s; render();
-      }
-    });
-    c.on('close', () => { LINK.ok = false; LINK.status = 'reconnecting'; render(); setTimeout(connect, 2500); });
-  };
-  if (LINK.peer && !LINK.peer.destroyed) { connect(); return; }
-  const peer = new Peer({debug:0});
-  LINK.peer = peer;
-  peer.on('open', connect);
-  peer.on('disconnected', () => { try { peer.reconnect(); } catch(e){} });
-  peer.on('error', e => {
-    if (e.type === 'peer-unavailable') {
-      if (!S) { LOCAL.err = 'Room ' + code + ' not found. Check the code on the Team A device.'; LINK.status = ''; try { peer.destroy(); } catch(_){} LINK.peer = null; render(); }
-      else { LINK.status = 'reconnecting'; render(); setTimeout(connect, 3000); }
-    } else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') { LINK.status = 'offline'; render(); }
-  });
+  LINK.code = code; LS.set('mr-join', code); LINK.status = 'connecting'; LINK.ok = false; render();
+  netStart(code, ['s', 'h'], (sub, m) => {
+    NET.lastPeer = Date.now();
+    if (sub === 's' && m.k === 'state' && m.s && m.seq > NET.lastSeq) {
+      NET.lastSeq = m.seq; m.s.timer.end = Date.now() + m.s.timer.rem; S = m.s;
+    }
+    if (!LINK.ok) { LINK.ok = true; LINK.status = 'linked'; LOCAL.err = ''; beep(660, .12); }
+    render();
+  }, c => netPub('g', {k:'hello'}, false, c));
 }
+/* heartbeat: each device says "I'm here" every 4 s; 12 s of silence = link lost */
+setInterval(() => {
+  if (!NET.clients.length || (ROLE !== 'host' && ROLE !== 'guest')) return;
+  const now = Date.now();
+  netPub(ROLE === 'host' ? 'h' : 'g', {k:'ping'});
+  const up = netUp();
+  if (LINK.ok && now - NET.lastPeer > 12000) { LINK.ok = false; LINK.status = ROLE === 'host' ? 'waiting' : 'reconnecting'; render(); }
+  else if (!up && now - NET.started > 10000 && LINK.status !== 'offline') { LINK.status = 'offline'; render(); }
+  else if (up && LINK.status === 'offline') { LINK.status = LINK.ok ? 'linked' : (ROLE === 'host' ? 'waiting' : 'connecting'); render(); }
+  if (ROLE === 'guest' && !S && !LINK.ok && now - NET.started > 12000 && up) {
+    LOCAL.err = 'Room ' + LINK.code + ' not found. Check the code, and that the Team A device has the game open.';
+    netStop(); ROLE = null; LINK.status = ''; render();
+  }
+}, 4000);
 
 /* ---------- sound ---------- */
 let AC = null;
@@ -525,8 +550,8 @@ function local(cmd, a){
     case 'quit':
       if (S && ROLE !== 'guest' && !confirmTwice('quit')) break;
       LOCAL.menu = false; $('#menu').hidden = true;
-      try { LINK.peer && LINK.peer.destroy(); } catch(e){}
-      Object.assign(LINK, {peer:null, conn:null, ok:false, code:'', status:''});
+      netStop(ROLE === 'host');
+      Object.assign(LINK, {ok:false, code:'', status:''});
       ROLE = null; S = null; lastFlash = 0; render(); break;
   }
 }
