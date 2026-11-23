@@ -473,7 +473,7 @@ function reduce(a, from){
       break;
     case 'buzz': // round 5
       if (R !== 5 || S.phase !== 'play' || t === S.d.holder) break;
-      pauseTimer(); S.d.buzzedBy = t; S.phase = 'buzz';
+      pauseTimer(); S.d.buzzedBy = t; S.d.nb = (S.d.nb || 0) + 1; S.phase = 'buzz';
       break;
     case 'rule':
       if (R !== 5 || S.phase !== 'buzz') break;
@@ -614,7 +614,30 @@ setInterval(() => {
 
 /* ---------- sound ---------- */
 let AC = null;
-function unlockAudio(){ if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} } if (AC && AC.state === 'suspended') AC.resume(); }
+function unlockAudio(){
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){} // iPad: play even when the silent switch is on
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+/* loud game-show buzzer: three detuned harsh tones through a compressor, ~0.9 s */
+function buzzSound(){
+  unlockAudio(); if (!AC) return;
+  try {
+    const t = AC.currentTime + 0.01, out = AC.createGain(), comp = AC.createDynamicsCompressor();
+    comp.threshold.value = -12; comp.knee.value = 6; comp.ratio.value = 6;
+    out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(1, t + 0.02);
+    out.gain.setValueAtTime(1, t + 0.75); out.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+    out.connect(comp); comp.connect(AC.destination);
+    [[110, 'square'], [147, 'sawtooth'], [220, 'square'], [233, 'sawtooth']].forEach(([f, ty]) => {
+      const o = AC.createOscillator(), g = AC.createGain();
+      o.type = ty; o.frequency.value = f; g.gain.value = 0.4;
+      o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.95);
+    });
+  } catch(e){}
+  if (navigator.vibrate) try { navigator.vibrate(400); } catch(e){}
+}
+let lastBuzzKey = '';
+function buzzKey(nb){ return S.round + '-' + S.idx + '-' + nb; }
 function beep(f, d, type){ if (!AC) return; try { const o = AC.createOscillator(), g = AC.createGain(); o.type = type || 'sine'; o.frequency.value = f; g.gain.setValueAtTime(.18, AC.currentTime); g.gain.exponentialRampToValueAtTime(.001, AC.currentTime + d); o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime + d); } catch(e){} }
 
 /* ---------- rendering ---------- */
@@ -641,6 +664,7 @@ function render(){
   restoreFocus(f);
   if (LOCAL.menu) renderMenu();
   showFlash();
+  if (S && S.screen === 'item' && S.round === 5 && S.phase === 'buzz') { const k = buzzKey(S.d.nb || 1); if (k !== lastBuzzKey) { lastBuzzKey = k; buzzSound(); } }
   tick();
 }
 function renderBoard(){
@@ -873,6 +897,7 @@ document.addEventListener('click', e => {
   for (const k in b.dataset) if (k !== 'a') a[k] = b.dataset[k];
   ['team','c','r','d'].forEach(k => { if (a[k] != null) a[k] = +a[k]; });
   if (a.t.startsWith('L:')) return local(a.t.slice(2), a, b);
+  if (a.t === 'buzz' && S && S.phase === 'play') { lastBuzzKey = buzzKey((S.d.nb || 0) + 1); buzzSound(); }
   if (b.closest('#menu')) { LOCAL.menu = false; $('#menu').hidden = true; }
   act(a);
 });
