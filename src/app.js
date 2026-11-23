@@ -256,23 +256,41 @@ function unlockAudio(){
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){} // iPad: play even when the silent switch is on
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
   if (AC && AC.state === 'suspended') AC.resume();
+  loadBuzz();
 }
-/* loud game-show buzzer: three detuned harsh tones through a compressor, ~0.9 s */
+/* buzzer: the trainer's own sound file (embedded), decoded once and played through Web Audio.
+   If it can't be decoded, a synthesised buzzer plays instead. */
+const BUZZ_MP3 = 'data:audio/mpeg;base64,%%BUZZER%%';
+let buzzBuf = null, buzzLoading = false;
+function loadBuzz(){
+  if (!AC || buzzBuf || buzzLoading) return;
+  buzzLoading = true;
+  try {
+    const bin = atob(BUZZ_MP3.split(',')[1]), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    const done = buf => { buzzBuf = buf; buzzLoading = false; }, fail = () => { buzzLoading = false; };
+    const pr = AC.decodeAudioData(u.buffer, done, fail);   // callback form for older Safari
+    if (pr && pr.catch) pr.catch(fail);
+  } catch(e){ buzzLoading = false; }
+}
 function buzzSound(){
   unlockAudio(); if (!AC) return;
   try {
-    const t = AC.currentTime + 0.01, out = AC.createGain(), comp = AC.createDynamicsCompressor();
-    comp.threshold.value = -12; comp.knee.value = 6; comp.ratio.value = 6;
-    out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(1, t + 0.02);
-    out.gain.setValueAtTime(1, t + 0.75); out.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
-    out.connect(comp); comp.connect(AC.destination);
-    [[110, 'square'], [147, 'sawtooth'], [220, 'square'], [233, 'sawtooth']].forEach(([f, ty]) => {
-      const o = AC.createOscillator(), g = AC.createGain();
-      o.type = ty; o.frequency.value = f; g.gain.value = 0.4;
-      o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.95);
-    });
+    if (buzzBuf) { const src = AC.createBufferSource(), g = AC.createGain(); g.gain.value = 1; src.buffer = buzzBuf; src.connect(g); g.connect(AC.destination); src.start(); }
+    else synthBuzz();
   } catch(e){}
   if (navigator.vibrate) try { navigator.vibrate(400); } catch(e){}
+}
+function synthBuzz(){
+  const t = AC.currentTime + 0.01, out = AC.createGain(), comp = AC.createDynamicsCompressor();
+  comp.threshold.value = -12; comp.knee.value = 6; comp.ratio.value = 6;
+  out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(1, t + 0.02);
+  out.gain.setValueAtTime(1, t + 0.75); out.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+  out.connect(comp); comp.connect(AC.destination);
+  [[110, 'square'], [147, 'sawtooth'], [220, 'square'], [233, 'sawtooth']].forEach(([f, ty]) => {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = ty; o.frequency.value = f; g.gain.value = 0.4; o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.95);
+  });
 }
 let lastBuzzKey = '';
 function buzzKey(nb){ return S.round + '-' + S.idx + '-' + nb; }
