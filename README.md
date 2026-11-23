@@ -17,3 +17,6 @@ Team game for light aircraft mechanics (Emerald Language Learning): 2 teams of 3
 
 ## Editing
 Content is in `src/content.js`, logic in `src/app.js`, styles in `src/shell.html`. Run `python3 src/build.py` to rebuild `index.html`. Pushing to `main` rebuilds the APK.
+
+## Sound
+The buzzer sound was synthesised for this game (118 Hz harmonic tone, 1.2 s) and is released under CC0 – no attribution needed. Source data: `src/buzzer-mp3.b64` (base64 MP3).
