@@ -258,7 +258,7 @@ function unlockAudio(){
   if (AC && AC.state === 'suspended') AC.resume();
   loadBuzz();
 }
-/* buzzer: the trainer's own sound file (embedded), decoded once and played through Web Audio.
+/* buzzer: original sound synthesised for this game (CC0), recreated to match a classic wrong-answer buzzer; embedded, decoded once, played through Web Audio.
    If it can't be decoded, a synthesised buzzer plays instead. */
 const BUZZ_MP3 = 'data:audio/mpeg;base64,%%BUZZER%%';
 let buzzBuf = null, buzzLoading = false;
